@@ -1,27 +1,96 @@
 from flask import Flask, request, jsonify, send_file, redirect, url_for, session, current_app
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from flask_cors import CORS
-from models import db, User, Application, File  # Added File import
+from models import db, User, Application, File
 import os
 from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
 import mimetypes
 import uuid
 import shutil
+import logging
+import pymysql
 
+# Install PyMySQL as MySQL driver
+pymysql.install_as_MySQLdb()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Get environment variables or use defaults
+ENVIRONMENT = os.environ.get('FLASK_ENV', 'production')
+PRODUCTION_DOMAIN = os.environ.get('PRODUCTION_DOMAIN', 'https://gradpath-2.vercel.app')
+
+# Initialize Flask app
 app = Flask(__name__)
-# Configure CORS to allow requests from your React app
-CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
 
-app.config['SECRET_KEY'] = 'your-secret-key-here'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///applicants.db'
+# Log deployment information
+logger.info(f"Application deployed/updated by: Rishikesh0523")
+logger.info(f"Deployment timestamp: 2025-03-22 17:38:22 UTC")
+logger.info(f"Environment: {ENVIRONMENT}")
+
+# Configure CORS based on environment
+if ENVIRONMENT == 'production':
+    # Production CORS settings - restrict to your domain only
+    CORS(app, 
+         resources={r"/api/*": {"origins": PRODUCTION_DOMAIN}},
+         supports_credentials=True,
+         allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+         methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+    
+    logger.info(f"CORS configured for production: {PRODUCTION_DOMAIN}")
+else:
+    # Development CORS settings - allow localhost
+    CORS(app, 
+         resources={r"/api/*": {"origins": "http://localhost:3000"}},
+         supports_credentials=True)
+    
+    logger.info("CORS configured for development environment (localhost)")
+
+# Configure app settings
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secure-key-here')
+
+# MySQL database configuration
+DB_USER = os.environ.get('DB_USER')
+DB_PASSWORD = os.environ.get('DB_PASSWORD')
+DB_HOST = os.environ.get('DB_HOST')
+DB_NAME = os.environ.get('DB_NAME')
+app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}?charset=utf8mb4'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max upload size
+
+# MySQL specific optimizations
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_recycle': 280,
+    'pool_pre_ping': True,
+    'pool_size': 10,
+    'max_overflow': 20
+}
+
+app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER', 'uploads')
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))  # 16 MB max upload size
+
+# Production security settings
+if ENVIRONMENT == 'production':
+    app.config['SESSION_COOKIE_SECURE'] = True
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=1)
+
+# Security headers middleware
+@app.after_request
+def add_security_headers(response):
+    if ENVIRONMENT == 'production':
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+        response.headers['X-XSS-Protection'] = '1; mode=block'
+    return response
 
 # Ensure upload directory exists
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
+    logger.info(f"Created upload directory: {app.config['UPLOAD_FOLDER']}")
 
 # Initialize database
 db.init_app(app)
@@ -36,20 +105,25 @@ def load_user(user_id):
 
 # Create database tables
 with app.app_context():
-    db.create_all()
-    
-    # Create default admin user if no users exist
-    if not User.query.first():
-        admin = User(
-            email='admin@example.com',
-            is_admin=True,
-            first_name='Admin',
-            last_name='User'
-        )
-        admin.set_password('admin123')
-        db.session.add(admin)
-        db.session.commit()
-        print("Default admin user created with email: admin@example.com and password: admin123")
+    try:
+        db.create_all()
+        logger.info("Database tables created or verified")
+        
+        # Create default admin user if no users exist
+        if not User.query.first():
+            admin = User(
+                email='admin@example.com',
+                is_admin=True,
+                first_name='Admin',
+                last_name='User'
+            )
+            admin.set_password('admin123')
+            db.session.add(admin)
+            db.session.commit()
+            print("Default admin user created with email: admin@example.com and password: admin123")
+            logger.info("Default admin user created")
+    except Exception as e:
+        logger.error(f"Database initialization error: {str(e)}")
 
 # Helper functions
 def get_file_extension(filename):
@@ -71,10 +145,120 @@ def get_mime_type(file_path):
     """Get the MIME type of a file."""
     return mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
 
+# Root route handler
+@app.route('/')
+def index():
+    """
+    Root endpoint that returns API information.
+    This prevents 404 errors when accessing the root URL.
+    """
+    return jsonify({
+        'name': 'PhD Application Tracking API',
+        'version': '1.0.0',
+        'status': 'online',
+        'timestamp': '2025-03-22 17:38:22',
+        'deployed_by': 'Rishikesh0523',
+        'api_prefix': '/api',
+        'documentation': '/api/docs',
+        'environment': ENVIRONMENT,
+        'database': 'MySQL'
+    }), 200
+
+# Health check endpoint
+@app.route('/api/health-check', methods=['GET'])
+def health_check():
+    """Health check endpoint for monitoring."""
+    try:
+        # Check database connection
+        db_status = "connected" if db.engine.table_names() else "error"
+        db_type = "MySQL"
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+        db_type = "Unknown"
+        
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': '2025-03-22 17:38:22',
+        'version': '1.0.0',
+        'database': {
+            'status': db_status,
+            'type': db_type
+        },
+        'environment': ENVIRONMENT
+    }), 200
+
+# API documentation endpoint
+@app.route('/api/docs')
+def api_docs():
+    """Simple API documentation endpoint."""
+    endpoints = [
+        {'path': '/api/register', 'method': 'POST', 'description': 'Register a new user'},
+        {'path': '/api/login', 'method': 'POST', 'description': 'Log in a user'},
+        {'path': '/api/check-auth', 'method': 'GET', 'description': 'Check authentication status'},
+        {'path': '/api/logout', 'method': 'POST', 'description': 'Log out a user'},
+        {'path': '/api/submit-application', 'method': 'POST', 'description': 'Submit a new application'},
+        {'path': '/api/get-application', 'method': 'GET', 'description': 'Get current user\'s application'},
+        {'path': '/api/get-application/<id>', 'method': 'GET', 'description': 'Get application by ID'},
+        {'path': '/api/update-application/<id>', 'method': 'PUT', 'description': 'Update application by ID'},
+        {'path': '/api/update-application-status/<id>', 'method': 'PUT', 'description': 'Update application status by ID'},
+        {'path': '/api/delete-application/<id>', 'method': 'DELETE', 'description': 'Delete application by ID'},
+        {'path': '/api/upload-file', 'method': 'POST', 'description': 'Upload a file'},
+        {'path': '/api/files/<id>/download', 'method': 'GET', 'description': 'Download a file'},
+        {'path': '/api/files/<id>/view', 'method': 'GET', 'description': 'View a file in browser'},
+        {'path': '/api/user/profile', 'method': 'GET', 'description': 'Get user profile'},
+        {'path': '/api/get-all-applications', 'method': 'GET', 'description': 'Admin: Get all applications'},
+        {'path': '/api/admin/users', 'method': 'GET', 'description': 'Admin: Get all users'},
+        {'path': '/api/admin/create-user', 'method': 'POST', 'description': 'Admin: Create a user'},
+        {'path': '/api/admin/delete-user/<id>', 'method': 'DELETE', 'description': 'Admin: Delete a user'},
+        {'path': '/api/admin/university-report', 'method': 'GET', 'description': 'Admin: Get university report'},
+        {'path': '/api/admin/enrollment-statistics', 'method': 'GET', 'description': 'Admin: Get enrollment statistics'},
+    ]
+    
+    return jsonify({
+        'api_name': 'PhD Application Tracking API',
+        'version': '1.0.0',
+        'last_updated': '2025-03-22 17:38:22',
+        'maintainer': 'Rishikesh0523',
+        'database': 'MySQL',
+        'endpoints': endpoints
+    }), 200
+
+# Test CORS endpoint
+@app.route('/api/test-cors', methods=['GET'])
+def test_cors():
+    """Test endpoint to verify CORS configuration."""
+    return jsonify({
+        'message': 'CORS is correctly configured',
+        'environment': ENVIRONMENT,
+        'timestamp': '2025-03-22 17:38:22',
+        'configured_by': 'Rishikesh0523'
+    }), 200
+
+# Database connection test endpoint
+@app.route('/api/test-db', methods=['GET'])
+def test_db():
+    """Test endpoint to verify database connection."""
+    try:
+        # Simple query to test the connection
+        result = db.session.execute('SELECT VERSION()').scalar()
+        return jsonify({
+            'status': 'connected',
+            'database': 'MySQL',
+            'version': result,
+            'timestamp': '2025-03-22 17:38:22'
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'timestamp': '2025-03-22 17:38:22'
+        }), 500
+
 # Routes
 @app.route('/api/register', methods=['POST'])
 def register():
     data = request.get_json()
+    logger.info(f"Registration attempt for email: {data.get('email', 'unknown')}")
     
     # Validate required fields
     if not data or not data.get('email') or not data.get('password'):
@@ -98,6 +282,8 @@ def register():
     db.session.add(new_user)
     db.session.commit()
     
+    logger.info(f"New user registered: {data.get('email')}")
+    
     return jsonify({
         'message': 'User registered successfully',
         'user_id': new_user.id
@@ -113,9 +299,11 @@ def login():
     user = User.query.filter_by(email=data['email']).first()
     
     if not user or not user.check_password(data['password']):
+        logger.warning(f"Failed login attempt for email: {data.get('email')}")
         return jsonify({'message': 'Invalid email or password'}), 401
     
     login_user(user)
+    logger.info(f"User logged in: {user.email}")
     
     return jsonify({
         'message': 'Login successful',
@@ -138,6 +326,8 @@ def check_auth():
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
+    if current_user.is_authenticated:
+        logger.info(f"User logged out: {current_user.email}")
     logout_user()
     return jsonify({'message': 'Logout successful'}), 200
 
@@ -204,6 +394,8 @@ def upload_file():
             setattr(application, file_type, new_file.id)
             db.session.commit()
     
+    logger.info(f"File uploaded: {file_type} by user {current_user.id}")
+    
     return jsonify({
         'message': 'File uploaded successfully',
         'fileId': new_file.id,
@@ -219,11 +411,14 @@ def download_file(file_id):
     
     # Security check - only admin or file owner can download
     if not current_user.is_admin and file.user_id != current_user.id:
+        logger.warning(f"Unauthorized file download attempt: file {file_id} by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     # Check if file exists on disk
     if not os.path.exists(file.file_path):
         return jsonify({'message': 'File not found on server'}), 404
+    
+    logger.info(f"File downloaded: {file_id} by user {current_user.id}")
     
     # Set attachment filename to original name
     return send_file(
@@ -240,11 +435,14 @@ def view_file(file_id):
     
     # Security check - only admin or file owner can view
     if not current_user.is_admin and file.user_id != current_user.id:
+        logger.warning(f"Unauthorized file view attempt: file {file_id} by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     # Check if file exists on disk
     if not os.path.exists(file.file_path):
         return jsonify({'message': 'File not found on server'}), 404
+    
+    logger.info(f"File viewed: {file_id} by user {current_user.id}")
     
     # Show in browser instead of downloading
     return send_file(
@@ -269,6 +467,8 @@ def submit_application():
         existing_application.updated_at = datetime.utcnow()
         db.session.commit()
         
+        logger.info(f"Application updated: {existing_application.id} by user {current_user.id}")
+        
         return jsonify({
             'message': 'Application updated successfully',
             'application_id': existing_application.id
@@ -283,6 +483,8 @@ def submit_application():
         
         db.session.add(new_application)
         db.session.commit()
+        
+        logger.info(f"New application submitted: {new_application.id} by user {current_user.id}")
         
         return jsonify({
             'message': 'Application submitted successfully',
@@ -306,6 +508,7 @@ def get_application_by_id(application_id):
     
     # Security check - only admin or application owner can view
     if not current_user.is_admin and application.user_id != current_user.id:
+        logger.warning(f"Unauthorized application access attempt: {application_id} by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     return jsonify(application.to_dict()), 200
@@ -317,6 +520,7 @@ def update_application(application_id):
     
     # Security check - only admin or application owner can update
     if not current_user.is_admin and application.user_id != current_user.id:
+        logger.warning(f"Unauthorized application update attempt: {application_id} by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     data = request.get_json()
@@ -328,6 +532,8 @@ def update_application(application_id):
     
     application.updated_at = datetime.utcnow()
     db.session.commit()
+    
+    logger.info(f"Application updated: {application_id} by user {current_user.id}")
     
     return jsonify({
         'message': 'Application updated successfully',
@@ -341,6 +547,7 @@ def update_application_status(application_id):
     
     # Security check - only admin or application owner can update
     if not current_user.is_admin and application.user_id != current_user.id:
+        logger.warning(f"Unauthorized status update attempt: {application_id} by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     data = request.get_json()
@@ -359,6 +566,8 @@ def update_application_status(application_id):
     application.updated_at = datetime.utcnow()
     db.session.commit()
     
+    logger.info(f"Application status updated: {application_id} by user {current_user.id}")
+    
     return jsonify({
         'message': 'Application status updated successfully',
         'application_id': application.id
@@ -371,6 +580,7 @@ def delete_application(application_id):
     
     # Security check - only admin or application owner can delete
     if not current_user.is_admin and application.user_id != current_user.id:
+        logger.warning(f"Unauthorized application delete attempt: {application_id} by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     # Delete associated files if they're no longer needed
@@ -401,6 +611,8 @@ def delete_application(application_id):
     db.session.delete(application)
     db.session.commit()
     
+    logger.info(f"Application deleted: {application_id} by user {current_user.id}")
+    
     return jsonify({'message': 'Application deleted successfully'}), 200
 
 @app.route('/api/get-all-applications', methods=['GET'])
@@ -408,9 +620,12 @@ def delete_application(application_id):
 def get_all_applications():
     # Security check - only admin can view all applications
     if not current_user.is_admin:
+        logger.warning(f"Unauthorized access attempt to all applications by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     applications = Application.query.all()
+    logger.info(f"All applications retrieved by admin {current_user.id}")
+    
     return jsonify([app.to_dict() for app in applications]), 200
 
 @app.route('/api/user/profile', methods=['GET'])
@@ -429,13 +644,13 @@ def get_user_profile():
             'last_name': current_user.last_name,
             'is_admin': current_user.is_admin,
             # Use the information you provided
-            'username': 'User',
-            'current_date': '2025-03-22 16:22:40'
+            'username': 'Rishikesh0523',
+            'current_date': '2025-03-22 17:38:22'
         }
         
         return jsonify(user_data), 200
     except Exception as e:
-        app.logger.error(f"Error fetching user profile: {str(e)}")
+        logger.error(f"Error fetching user profile: {str(e)}")
         return jsonify({'message': 'Failed to retrieve user profile'}), 500
 
 @app.route('/api/admin/users', methods=['GET'])
@@ -443,6 +658,7 @@ def get_user_profile():
 def get_all_users():
     # Security check - only admin can view all users
     if not current_user.is_admin:
+        logger.warning(f"Unauthorized access attempt to users list by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     users = User.query.all()
@@ -457,6 +673,8 @@ def get_all_users():
             user_dict['application_id'] = application.id
         user_data.append(user_dict)
     
+    logger.info(f"All users retrieved by admin {current_user.id}")
+    
     return jsonify(user_data), 200
 
 @app.route('/api/admin/create-user', methods=['POST'])
@@ -464,6 +682,7 @@ def get_all_users():
 def create_user():
     # Security check - only admin can create users
     if not current_user.is_admin:
+        logger.warning(f"Unauthorized user creation attempt by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     data = request.get_json()
@@ -490,6 +709,8 @@ def create_user():
     db.session.add(new_user)
     db.session.commit()
     
+    logger.info(f"New user created by admin {current_user.id}: {data.get('email')}")
+    
     return jsonify({
         'message': 'User created successfully',
         'user_id': new_user.id
@@ -500,6 +721,7 @@ def create_user():
 def delete_user(user_id):
     # Security check - only admin can delete users
     if not current_user.is_admin:
+        logger.warning(f"Unauthorized user deletion attempt by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     # Cannot delete self
@@ -517,6 +739,8 @@ def delete_user(user_id):
     db.session.delete(user)
     db.session.commit()
     
+    logger.info(f"User deleted by admin {current_user.id}: user {user_id}")
+    
     return jsonify({'message': 'User deleted successfully'}), 200
 
 @app.route('/api/admin/university-report', methods=['GET'])
@@ -524,6 +748,7 @@ def delete_user(user_id):
 def get_university_report():
     # Security check - only admin can access reports
     if not current_user.is_admin:
+        logger.warning(f"Unauthorized report access attempt by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     # Get enrolled students grouped by university
@@ -544,11 +769,13 @@ def get_university_report():
         } for item in enrolled_data
     ]
     
+    logger.info(f"University report generated by admin {current_user.id}")
+    
     return jsonify({
-        'report_date': '2025-03-22 16:22:40',  # Use the provided date/time
+        'report_date': '2025-03-22 17:38:22',
         'total_enrolled': sum(item['student_count'] for item in university_report),
         'universities': university_report,
-        'generated_by': 'User'  # Add the username
+        'generated_by': 'Rishikesh0523'
     }), 200
 
 @app.route('/api/admin/enrollment-statistics', methods=['GET'])
@@ -556,6 +783,7 @@ def get_university_report():
 def get_enrollment_statistics():
     # Security check - only admin can access statistics
     if not current_user.is_admin:
+        logger.warning(f"Unauthorized statistics access attempt by user {current_user.id}")
         return jsonify({'message': 'Unauthorized access'}), 403
     
     # Count applications by enrollment status
@@ -576,21 +804,74 @@ def get_enrollment_statistics():
     # Get total applications
     total_applications = Application.query.count()
     
+    logger.info(f"Enrollment statistics generated by admin {current_user.id}")
+    
     return jsonify({
-        'report_date': '2025-03-22 16:22:40',  # Use the provided date/time
+        'report_date': '2025-03-22 17:38:22',
         'total_applications': total_applications,
         'status_counts': status_counts,
-        'generated_by': 'User'  # Add the username
+        'generated_by': 'Rishikesh0523'
     }), 200
+
+# Database backup endpoint (admin only)
+@app.route('/api/admin/backup-database', methods=['POST'])
+@login_required
+def backup_database():
+    # Security check - only admin can backup database
+    if not current_user.is_admin:
+        logger.warning(f"Unauthorized database backup attempt by user {current_user.id}")
+        return jsonify({'message': 'Unauthorized access'}), 403
+    
+    try:
+        # Get current timestamp for the backup file
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_file = f"backup_{DB_NAME}_{timestamp}.sql"
+        
+        # Execute mysqldump command
+        os.system(f"mysqldump -u {DB_USER} -p{DB_PASSWORD} {DB_NAME} > {backup_file}")
+        
+        # Compress the backup
+        os.system(f"gzip {backup_file}")
+        
+        logger.info(f"Database backup created: {backup_file}.gz by admin {current_user.id}")
+        
+        return jsonify({
+            'message': 'Database backup created successfully',
+            'backup_file': f"{backup_file}.gz",
+            'timestamp': '2025-03-22 17:38:22',
+            'database': DB_NAME
+        }), 200
+    except Exception as e:
+        logger.error(f"Database backup error: {str(e)}")
+        return jsonify({
+            'message': 'Database backup failed',
+            'error': str(e)
+        }), 500
 
 # Error handlers
 @app.errorhandler(404)
 def not_found(error):
+    logger.warning(f"404 error: {request.path}")
     return jsonify({'message': 'Resource not found'}), 404
 
 @app.errorhandler(500)
 def server_error(error):
+    logger.error(f"500 error: {str(error)}")
     return jsonify({'message': 'Internal server error'}), 500
 
+@app.errorhandler(403)
+def forbidden(error):
+    logger.warning(f"403 error: {request.path}")
+    return jsonify({'message': 'Forbidden: you do not have permission to access this resource'}), 403
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Check if running in production
+    if ENVIRONMENT == 'production':
+        # Use production server settings
+        port = int(os.environ.get('PORT', 5000))
+        app.run(host='0.0.0.0', port=port, debug=False)
+        logger.info(f"Starting production server on port {port}")
+    else:
+        # Use development server settings
+        app.run(debug=True)
+        logger.info("Starting development server with debug mode")
