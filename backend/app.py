@@ -11,15 +11,14 @@ import shutil
 
 app = Flask(__name__)
 
-PRODUCTION_DOMAIN = 'https://localhost:3000'  # Update with your frontend domain
+PRODUCTION_DOMAIN = 'https://gradpath-2.vercel.app/'  # Update with your frontend domain
 # Production CORS settings - restrict to your domain only
 CORS(app, 
         resources={r"/api/*": {"origins": PRODUCTION_DOMAIN}},
         supports_credentials=True,
         allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
         methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-
-logger.info(f"CORS configured for production: {PRODUCTION_DOMAIN}")
+# Development CORS settings - allow all origins
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///applicants.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
