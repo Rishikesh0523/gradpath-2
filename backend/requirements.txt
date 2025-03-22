@@ -4,3 +4,7 @@ Flask-Cors==3.0.10
 Werkzeug==2.2.3
 python-dotenv==1.0.0
 flask-login==0.6.3
+pymysql==1.1.1
+cryptography==44.0.2
+flask-migrate==4.1.0
+python-dotenv==1.0.0

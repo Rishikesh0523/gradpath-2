@@ -9,6 +9,10 @@ import mimetypes
 import uuid
 import shutil
 import logging
+import pymysql
+
+# Install PyMySQL as MySQL driver
+pymysql.install_as_MySQLdb()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,7 +27,7 @@ app = Flask(__name__)
 
 # Log deployment information
 logger.info(f"Application deployed/updated by: Rishikesh0523")
-logger.info(f"Deployment timestamp: 2025-03-22 17:17:19 UTC")
+logger.info(f"Deployment timestamp: 2025-03-22 17:38:22 UTC")
 logger.info(f"Environment: {ENVIRONMENT}")
 
 # Configure CORS based on environment
@@ -45,11 +49,26 @@ else:
     logger.info("CORS configured for development environment (localhost)")
 
 # Configure app settings
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///applicants.db')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secure-key-here')
+
+# MySQL database configuration
+DB_USER = os.environ.get('DB_USER')
+DB_PASSWORD = os.environ.get('DB_PASSWORD')
+DB_HOST = os.environ.get('DB_HOST')
+DB_NAME = os.environ.get('DB_NAME')
+app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}?charset=utf8mb4'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# MySQL specific optimizations
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_recycle': 280,
+    'pool_pre_ping': True,
+    'pool_size': 10,
+    'max_overflow': 20
+}
+
 app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER', 'uploads')
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max upload size
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))  # 16 MB max upload size
 
 # Production security settings
 if ENVIRONMENT == 'production':
@@ -86,22 +105,25 @@ def load_user(user_id):
 
 # Create database tables
 with app.app_context():
-    db.create_all()
-    logger.info("Database tables created")
-    
-    # Create default admin user if no users exist
-    if not User.query.first():
-        admin = User(
-            email='admin@example.com',
-            is_admin=True,
-            first_name='Admin',
-            last_name='User'
-        )
-        admin.set_password('admin123')
-        db.session.add(admin)
-        db.session.commit()
-        print("Default admin user created with email: admin@example.com and password: admin123")
-        logger.info("Default admin user created")
+    try:
+        db.create_all()
+        logger.info("Database tables created or verified")
+        
+        # Create default admin user if no users exist
+        if not User.query.first():
+            admin = User(
+                email='admin@example.com',
+                is_admin=True,
+                first_name='Admin',
+                last_name='User'
+            )
+            admin.set_password('admin123')
+            db.session.add(admin)
+            db.session.commit()
+            print("Default admin user created with email: admin@example.com and password: admin123")
+            logger.info("Default admin user created")
+    except Exception as e:
+        logger.error(f"Database initialization error: {str(e)}")
 
 # Helper functions
 def get_file_extension(filename):
@@ -134,11 +156,12 @@ def index():
         'name': 'PhD Application Tracking API',
         'version': '1.0.0',
         'status': 'online',
-        'timestamp': '2025-03-22 17:17:19',
+        'timestamp': '2025-03-22 17:38:22',
         'deployed_by': 'Rishikesh0523',
         'api_prefix': '/api',
         'documentation': '/api/docs',
-        'environment': ENVIRONMENT
+        'environment': ENVIRONMENT,
+        'database': 'MySQL'
     }), 200
 
 # Health check endpoint
@@ -148,14 +171,19 @@ def health_check():
     try:
         # Check database connection
         db_status = "connected" if db.engine.table_names() else "error"
+        db_type = "MySQL"
     except Exception as e:
         db_status = f"error: {str(e)}"
+        db_type = "Unknown"
         
     return jsonify({
         'status': 'healthy',
-        'timestamp': '2025-03-22 17:17:19',
+        'timestamp': '2025-03-22 17:38:22',
         'version': '1.0.0',
-        'database': db_status,
+        'database': {
+            'status': db_status,
+            'type': db_type
+        },
         'environment': ENVIRONMENT
     }), 200
 
@@ -189,8 +217,9 @@ def api_docs():
     return jsonify({
         'api_name': 'PhD Application Tracking API',
         'version': '1.0.0',
-        'last_updated': '2025-03-22 17:17:19',
+        'last_updated': '2025-03-22 17:38:22',
         'maintainer': 'Rishikesh0523',
+        'database': 'MySQL',
         'endpoints': endpoints
     }), 200
 
@@ -201,9 +230,29 @@ def test_cors():
     return jsonify({
         'message': 'CORS is correctly configured',
         'environment': ENVIRONMENT,
-        'timestamp': '2025-03-22 17:17:19',
+        'timestamp': '2025-03-22 17:38:22',
         'configured_by': 'Rishikesh0523'
     }), 200
+
+# Database connection test endpoint
+@app.route('/api/test-db', methods=['GET'])
+def test_db():
+    """Test endpoint to verify database connection."""
+    try:
+        # Simple query to test the connection
+        result = db.session.execute('SELECT VERSION()').scalar()
+        return jsonify({
+            'status': 'connected',
+            'database': 'MySQL',
+            'version': result,
+            'timestamp': '2025-03-22 17:38:22'
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'timestamp': '2025-03-22 17:38:22'
+        }), 500
 
 # Routes
 @app.route('/api/register', methods=['POST'])
@@ -596,7 +645,7 @@ def get_user_profile():
             'is_admin': current_user.is_admin,
             # Use the information you provided
             'username': 'Rishikesh0523',
-            'current_date': '2025-03-22 17:17:19'
+            'current_date': '2025-03-22 17:38:22'
         }
         
         return jsonify(user_data), 200
@@ -723,7 +772,7 @@ def get_university_report():
     logger.info(f"University report generated by admin {current_user.id}")
     
     return jsonify({
-        'report_date': '2025-03-22 17:17:19',
+        'report_date': '2025-03-22 17:38:22',
         'total_enrolled': sum(item['student_count'] for item in university_report),
         'universities': university_report,
         'generated_by': 'Rishikesh0523'
@@ -758,11 +807,46 @@ def get_enrollment_statistics():
     logger.info(f"Enrollment statistics generated by admin {current_user.id}")
     
     return jsonify({
-        'report_date': '2025-03-22 17:17:19',
+        'report_date': '2025-03-22 17:38:22',
         'total_applications': total_applications,
         'status_counts': status_counts,
         'generated_by': 'Rishikesh0523'
     }), 200
+
+# Database backup endpoint (admin only)
+@app.route('/api/admin/backup-database', methods=['POST'])
+@login_required
+def backup_database():
+    # Security check - only admin can backup database
+    if not current_user.is_admin:
+        logger.warning(f"Unauthorized database backup attempt by user {current_user.id}")
+        return jsonify({'message': 'Unauthorized access'}), 403
+    
+    try:
+        # Get current timestamp for the backup file
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_file = f"backup_{DB_NAME}_{timestamp}.sql"
+        
+        # Execute mysqldump command
+        os.system(f"mysqldump -u {DB_USER} -p{DB_PASSWORD} {DB_NAME} > {backup_file}")
+        
+        # Compress the backup
+        os.system(f"gzip {backup_file}")
+        
+        logger.info(f"Database backup created: {backup_file}.gz by admin {current_user.id}")
+        
+        return jsonify({
+            'message': 'Database backup created successfully',
+            'backup_file': f"{backup_file}.gz",
+            'timestamp': '2025-03-22 17:38:22',
+            'database': DB_NAME
+        }), 200
+    except Exception as e:
+        logger.error(f"Database backup error: {str(e)}")
+        return jsonify({
+            'message': 'Database backup failed',
+            'error': str(e)
+        }), 500
 
 # Error handlers
 @app.errorhandler(404)
