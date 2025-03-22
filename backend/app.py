@@ -10,9 +10,16 @@ import uuid
 import shutil
 
 app = Flask(__name__)
-# Configure CORS to allow requests from your React app
-CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
 
+PRODUCTION_DOMAIN = 'https://localhost:3000'  # Update with your frontend domain
+# Production CORS settings - restrict to your domain only
+CORS(app, 
+        resources={r"/api/*": {"origins": PRODUCTION_DOMAIN}},
+        supports_credentials=True,
+        allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+        methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+
+logger.info(f"CORS configured for production: {PRODUCTION_DOMAIN}")
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///applicants.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
