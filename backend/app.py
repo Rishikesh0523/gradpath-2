@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Get environment variables or use defaults
-ENVIRONMENT = os.environ.get('FLASK_ENV', 'development')
+ENVIRONMENT = os.environ.get('FLASK_ENV', 'production')
 PRODUCTION_DOMAIN = os.environ.get('PRODUCTION_DOMAIN', 'https://gradpath-2.vercel.app')
 
 # Initialize Flask app
