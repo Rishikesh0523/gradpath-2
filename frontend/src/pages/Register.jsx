@@ -109,6 +109,9 @@ const Register = () => {
                 <h2 className="fw-light text-center mb-4" style={{ letterSpacing: '-0.5px' }}>
                   Create Your Account
                 </h2>
+                <p className="text-muted text-center mb-4 ">
+                  <strong className="text-danger">This is a free tier. The backend server can shutdown with inactivity.</strong>
+                </p>
                 
                 {error && (
                   <div className="alert alert-danger py-2 px-3" role="alert" style={{
