@@ -3,7 +3,7 @@ import axios from 'axios';
 
 // Create custom axios instance
 const instance = axios.create({
-  baseURL: 'https://gradpath-2.onrender.com',
+  baseURL: 'localhost:5000',
   timeout: 300000,
   withCredentials: true // Important for cookies/session
 });

@@ -2,37 +2,21 @@ from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_login import UserMixin
-import sqlalchemy as sa
 
 db = SQLAlchemy()
 
-# Define shared indexes and constraints
-class TimestampMixin:
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
 class User(db.Model, UserMixin):  # Added UserMixin for flask-login
-    __tablename__ = 'user'
-    
     id = db.Column(db.Integer, primary_key=True)
-    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
-    is_admin = db.Column(db.Boolean, default=False, index=True)
+    is_admin = db.Column(db.Boolean, default=False)
     first_name = db.Column(db.String(100))
     last_name = db.Column(db.String(100))
     contact_number = db.Column(db.String(20))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Relationships
     applications = db.relationship('Application', backref='user', lazy=True, cascade="all, delete-orphan")
     files = db.relationship('File', backref='user', lazy=True, cascade="all, delete-orphan")
-    
-    # MySQL specific indexing
-    __table_args__ = (
-        db.Index('idx_user_email_admin', 'email', 'is_admin'),
-        db.Index('idx_user_names', 'first_name', 'last_name'),
-        {'mysql_engine': 'InnoDB', 'mysql_charset': 'utf8mb4'}
-    )
     
     def set_password(self, password):
         self.password = generate_password_hash(password)
@@ -51,11 +35,9 @@ class User(db.Model, UserMixin):  # Added UserMixin for flask-login
             'created_at': self.created_at.strftime('%Y-%m-%d %H:%M:%S')
         }
 
-class Application(db.Model, TimestampMixin):
-    __tablename__ = 'application'
-    
+class Application(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     
     # Personal Details
     first_name = db.Column(db.String(100))
@@ -77,9 +59,9 @@ class Application(db.Model, TimestampMixin):
     applied_universities = db.Column(db.Text)
     accepted_universities = db.Column(db.Text)
     enrolled_university = db.Column(db.String(200))
-    enrollment_status = db.Column(db.String(50), default='planning', index=True)  # 'planning', 'applied', 'accepted', 'enrolled'
+    enrollment_status = db.Column(db.String(50), default='planning')  # 'planning', 'applied', 'accepted', 'enrolled'
     study_program = db.Column(db.String(200))
-    admission_year = db.Column(db.Integer, index=True)
+    admission_year = db.Column(db.Integer)
     scholarship_status = db.Column(db.String(50))
     
     # Additional Information
@@ -103,12 +85,9 @@ class Application(db.Model, TimestampMixin):
     availability_to_start = db.Column(db.String(50))
     additional_certifications = db.Column(db.Text)
     
-    # MySQL specific indexing and configuration
-    __table_args__ = (
-        db.Index('idx_application_status_year', 'enrollment_status', 'admission_year'),
-        db.Index('idx_application_university', 'enrolled_university'),
-        {'mysql_engine': 'InnoDB', 'mysql_charset': 'utf8mb4', 'mysql_row_format': 'DYNAMIC'}
-    )
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     def to_dict(self):
         return {
@@ -153,22 +132,14 @@ class Application(db.Model, TimestampMixin):
         }
 
 class File(db.Model):
-    __tablename__ = 'file'
-    
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     original_name = db.Column(db.String(255), nullable=False)
     file_path = db.Column(db.String(500), nullable=False)
-    file_type = db.Column(db.String(50), nullable=False, index=True)  # 'transcript', 'cv', 'photo', etc.
+    file_type = db.Column(db.String(50), nullable=False)  # 'transcript', 'cv', 'photo', etc.
     mime_type = db.Column(db.String(100))
     file_size = db.Column(db.Integer)  # Size in bytes
-    upload_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
-    
-    # MySQL specific indexing and configuration
-    __table_args__ = (
-        db.Index('idx_file_type_user', 'file_type', 'user_id'),
-        {'mysql_engine': 'InnoDB', 'mysql_charset': 'utf8mb4'}
-    )
+    upload_date = db.Column(db.DateTime, default=datetime.utcnow)
     
     def to_dict(self):
         return {
@@ -180,18 +151,3 @@ class File(db.Model):
             'file_size': self.file_size,
             'upload_date': self.upload_date.strftime('%Y-%m-%d %H:%M:%S')
         }
-
-# MySQL-specific table for storing system metadata
-class SystemMetadata(db.Model):
-    __tablename__ = 'system_metadata'
-    
-    id = db.Column(db.Integer, primary_key=True)
-    key_name = db.Column(db.String(100), unique=True, nullable=False, index=True)
-    value = db.Column(db.Text)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    updated_by = db.Column(db.String(100))
-    
-    # MySQL specific configuration
-    __table_args__ = (
-        {'mysql_engine': 'InnoDB', 'mysql_charset': 'utf8mb4'}
-    )
