@@ -8,3 +8,6 @@ pymysql==1.1.1
 cryptography==44.0.2
 flask-migrate==4.1.0
 python-dotenv==1.0.0
+pymongo==4.11.3
+flask-pymongo==3.0.1
+dnspython==2.7.0

@@ -1,30 +1,35 @@
 from flask import Flask, request, jsonify, send_file, redirect, url_for, session, current_app
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from flask_cors import CORS
-from models import db, User, Application, File  # Added File import
+from models import mongo, User, Application, File, init_db
 import os
 from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
 import mimetypes
 import uuid
 import shutil
+from dotenv import load_dotenv
+from bson.objectid import ObjectId
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 # Configure CORS to allow requests from your React app
-CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
+CORS(app, resources={r"/api/*": {"origins": os.getenv('CORS_ORIGIN')}}, supports_credentials=True)
 
-app.config['SECRET_KEY'] = 'your-secret-key-here'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///applicants.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max upload size
+# Load configuration from environment variables
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY')
+app.config['MONGO_URI'] = os.getenv('MONGODB_URI')
+app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', 'uploads')
+app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))  # 16 MB max upload size
 
 # Ensure upload directory exists
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
 
-# Initialize database
-db.init_app(app)
+# Initialize MongoDB
+mongo.init_app(app)
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -32,24 +37,10 @@ login_manager.init_app(app)
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    return User.find_by_id(user_id)
 
-# Create database tables
-with app.app_context():
-    db.create_all()
-    
-    # Create default admin user if no users exist
-    if not User.query.first():
-        admin = User(
-            email='admin@example.com',
-            is_admin=True,
-            first_name='Admin',
-            last_name='User'
-        )
-        admin.set_password('admin123')
-        db.session.add(admin)
-        db.session.commit()
-        print("Default admin user created with email: admin@example.com and password: admin123")
+# Initialize database with indexes and default admin
+init_db(app)
 
 # Helper functions
 def get_file_extension(filename):
@@ -81,22 +72,20 @@ def register():
         return jsonify({'message': 'Email and password are required'}), 400
     
     # Check if user already exists
-    existing_user = User.query.filter_by(email=data['email']).first()
+    existing_user = User.find_by_email(data['email'])
     if existing_user:
         return jsonify({'message': 'Email already registered'}), 400
     
     # Create new user
-    new_user = User(
-        email=data['email'],
-        is_admin=data.get('is_admin', False),
-        first_name=data.get('first_name', ''),
-        last_name=data.get('last_name', ''),
-        contact_number=data.get('contact_number', '')
-    )
+    new_user = User({
+        'email': data['email'],
+        'is_admin': data.get('is_admin', False),
+        'first_name': data.get('first_name', ''),
+        'last_name': data.get('last_name', ''),
+        'contact_number': data.get('contact_number', '')
+    })
     new_user.set_password(data['password'])
-    
-    db.session.add(new_user)
-    db.session.commit()
+    new_user.save()
     
     return jsonify({
         'message': 'User registered successfully',
@@ -110,7 +99,7 @@ def login():
     if not data or not data.get('email') or not data.get('password'):
         return jsonify({'message': 'Email and password are required'}), 400
     
-    user = User.query.filter_by(email=data['email']).first()
+    user = User.find_by_email(data['email'])
     
     if not user or not user.check_password(data['password']):
         return jsonify({'message': 'Invalid email or password'}), 401
@@ -185,24 +174,24 @@ def upload_file():
     mime_type = get_mime_type(file_path)
     
     # Create file record in database
-    new_file = File(
-        user_id=current_user.id,
-        original_name=secure_name,
-        file_path=file_path,
-        file_type=file_type,
-        mime_type=mime_type,
-        file_size=file_size
-    )
+    new_file = File({
+        'user_id': current_user.id,
+        'original_name': secure_name,
+        'file_path': file_path,
+        'file_type': file_type,
+        'mime_type': mime_type,
+        'file_size': file_size,
+        'upload_date': datetime.utcnow()
+    })
     
-    db.session.add(new_file)
-    db.session.commit()
+    new_file.save()
     
     # If this is for an existing application, update the application record
     if application_id:
-        application = Application.query.get(application_id)
+        application = Application.find_by_id(application_id)
         if application and application.user_id == current_user.id:
             setattr(application, file_type, new_file.id)
-            db.session.commit()
+            application.save()
     
     return jsonify({
         'message': 'File uploaded successfully',
@@ -212,10 +201,12 @@ def upload_file():
         'fileSize': new_file.file_size
     }), 201
 
-@app.route('/api/files/<int:file_id>/download', methods=['GET'])
+@app.route('/api/files/<file_id>/download', methods=['GET'])
 @login_required
 def download_file(file_id):
-    file = File.query.get_or_404(file_id)
+    file = File.find_by_id(file_id)
+    if not file:
+        return jsonify({'message': 'File not found'}), 404
     
     # Security check - only admin or file owner can download
     if not current_user.is_admin and file.user_id != current_user.id:
@@ -233,10 +224,12 @@ def download_file(file_id):
         mimetype=file.mime_type
     )
 
-@app.route('/api/files/<int:file_id>/view', methods=['GET'])
+@app.route('/api/files/<file_id>/view', methods=['GET'])
 @login_required
 def view_file(file_id):
-    file = File.query.get_or_404(file_id)
+    file = File.find_by_id(file_id)
+    if not file:
+        return jsonify({'message': 'File not found'}), 404
     
     # Security check - only admin or file owner can view
     if not current_user.is_admin and file.user_id != current_user.id:
@@ -258,7 +251,7 @@ def submit_application():
     data = request.get_json()
     
     # Check if user already has an application
-    existing_application = Application.query.filter_by(user_id=current_user.id).first()
+    existing_application = Application.find_by_user_id(current_user.id)
     
     if existing_application:
         # Update existing application
@@ -267,7 +260,7 @@ def submit_application():
                 setattr(existing_application, key, value)
         
         existing_application.updated_at = datetime.utcnow()
-        db.session.commit()
+        existing_application.save()
         
         return jsonify({
             'message': 'Application updated successfully',
@@ -275,14 +268,17 @@ def submit_application():
         }), 200
     else:
         # Create new application
-        new_application = Application(user_id=current_user.id)
+        new_application = Application({
+            'user_id': current_user.id,
+            'created_at': datetime.utcnow(),
+            'updated_at': datetime.utcnow()
+        })
         
         for key, value in data.items():
             if hasattr(new_application, key):
                 setattr(new_application, key, value)
         
-        db.session.add(new_application)
-        db.session.commit()
+        new_application.save()
         
         return jsonify({
             'message': 'Application submitted successfully',
@@ -292,17 +288,19 @@ def submit_application():
 @app.route('/api/get-application', methods=['GET'])
 @login_required
 def get_current_user_application():
-    application = Application.query.filter_by(user_id=current_user.id).first()
+    application = Application.find_by_user_id(current_user.id)
     
     if not application:
         return jsonify({'message': 'No application found for this user'}), 404
     
     return jsonify(application.to_dict()), 200
 
-@app.route('/api/get-application/<int:application_id>', methods=['GET'])
+@app.route('/api/get-application/<application_id>', methods=['GET'])
 @login_required
 def get_application_by_id(application_id):
-    application = Application.query.get_or_404(application_id)
+    application = Application.find_by_id(application_id)
+    if not application:
+        return jsonify({'message': 'Application not found'}), 404
     
     # Security check - only admin or application owner can view
     if not current_user.is_admin and application.user_id != current_user.id:
@@ -310,10 +308,12 @@ def get_application_by_id(application_id):
     
     return jsonify(application.to_dict()), 200
 
-@app.route('/api/update-application/<int:application_id>', methods=['PUT'])
+@app.route('/api/update-application/<application_id>', methods=['PUT'])
 @login_required
 def update_application(application_id):
-    application = Application.query.get_or_404(application_id)
+    application = Application.find_by_id(application_id)
+    if not application:
+        return jsonify({'message': 'Application not found'}), 404
     
     # Security check - only admin or application owner can update
     if not current_user.is_admin and application.user_id != current_user.id:
@@ -327,17 +327,19 @@ def update_application(application_id):
             setattr(application, key, value)
     
     application.updated_at = datetime.utcnow()
-    db.session.commit()
+    application.save()
     
     return jsonify({
         'message': 'Application updated successfully',
         'application_id': application.id
     }), 200
 
-@app.route('/api/update-application-status/<int:application_id>', methods=['PUT'])
+@app.route('/api/update-application-status/<application_id>', methods=['PUT'])
 @login_required
 def update_application_status(application_id):
-    application = Application.query.get_or_404(application_id)
+    application = Application.find_by_id(application_id)
+    if not application:
+        return jsonify({'message': 'Application not found'}), 404
     
     # Security check - only admin or application owner can update
     if not current_user.is_admin and application.user_id != current_user.id:
@@ -357,17 +359,19 @@ def update_application_status(application_id):
             setattr(application, field, data[field])
     
     application.updated_at = datetime.utcnow()
-    db.session.commit()
+    application.save()
     
     return jsonify({
         'message': 'Application status updated successfully',
         'application_id': application.id
     }), 200
 
-@app.route('/api/delete-application/<int:application_id>', methods=['DELETE'])
+@app.route('/api/delete-application/<application_id>', methods=['DELETE'])
 @login_required
 def delete_application(application_id):
-    application = Application.query.get_or_404(application_id)
+    application = Application.find_by_id(application_id)
+    if not application:
+        return jsonify({'message': 'Application not found'}), 404
     
     # Security check - only admin or application owner can delete
     if not current_user.is_admin and application.user_id != current_user.id:
@@ -377,17 +381,18 @@ def delete_application(application_id):
     for file_type in ['transcript', 'cv', 'photo']:
         file_id = getattr(application, file_type)
         if file_id:
-            file = File.query.get(file_id)
+            file = File.find_by_id(file_id)
             if file:
                 # Check if file is used by any other application
                 other_usage = False
-                for attr in ['transcript', 'cv', 'photo']:
-                    if Application.query.filter(
-                        Application.id != application_id,
-                        getattr(Application, attr) == file_id
-                    ).first():
-                        other_usage = True
-                        break
+                # Check other applications for usage of this file
+                all_applications = Application.get_all()
+                for app in all_applications:
+                    if app.id != application.id:
+                        for attr in ['transcript', 'cv', 'photo']:
+                            if getattr(app, attr) == file_id:
+                                other_usage = True
+                                break
                 
                 if not other_usage:
                     # Delete file from disk
@@ -395,11 +400,10 @@ def delete_application(application_id):
                         os.remove(file.file_path)
                     
                     # Delete file record
-                    db.session.delete(file)
+                    file.delete()
     
     # Delete application
-    db.session.delete(application)
-    db.session.commit()
+    application.delete()
     
     return jsonify({'message': 'Application deleted successfully'}), 200
 
@@ -410,7 +414,7 @@ def get_all_applications():
     if not current_user.is_admin:
         return jsonify({'message': 'Unauthorized access'}), 403
     
-    applications = Application.query.all()
+    applications = Application.get_all()
     return jsonify([app.to_dict() for app in applications]), 200
 
 @app.route('/api/user/profile', methods=['GET'])
@@ -428,9 +432,8 @@ def get_user_profile():
             'first_name': current_user.first_name,
             'last_name': current_user.last_name,
             'is_admin': current_user.is_admin,
-            # Use the information you provided
-            'username': 'User',
-            'current_date': '2025-03-22 16:22:40'
+            'username': 'Rishikesh0523',  # Using the login from your request
+            'current_date': '2025-03-23 05:16:48'  # Using the date from your request
         }
         
         return jsonify(user_data), 200
@@ -445,13 +448,13 @@ def get_all_users():
     if not current_user.is_admin:
         return jsonify({'message': 'Unauthorized access'}), 403
     
-    users = User.query.all()
+    users = User.get_all()
     
     # For each user, check if they have an application
     user_data = []
     for user in users:
         user_dict = user.to_dict()
-        application = Application.query.filter_by(user_id=user.id).first()
+        application = Application.find_by_user_id(user.id)
         user_dict['has_application'] = application is not None
         if application:
             user_dict['application_id'] = application.id
@@ -473,29 +476,28 @@ def create_user():
         return jsonify({'message': 'Email and password are required'}), 400
     
     # Check if user already exists
-    existing_user = User.query.filter_by(email=data['email']).first()
+    existing_user = User.find_by_email(data['email'])
     if existing_user:
         return jsonify({'message': 'Email already registered'}), 400
     
     # Create new user
-    new_user = User(
-        email=data['email'],
-        is_admin=data.get('is_admin', False),
-        first_name=data.get('first_name', ''),
-        last_name=data.get('last_name', ''),
-        contact_number=data.get('contact_number', '')
-    )
+    new_user = User({
+        'email': data['email'],
+        'is_admin': data.get('is_admin', False),
+        'first_name': data.get('first_name', ''),
+        'last_name': data.get('last_name', ''),
+        'contact_number': data.get('contact_number', ''),
+        'created_at': datetime.utcnow()
+    })
     new_user.set_password(data['password'])
-    
-    db.session.add(new_user)
-    db.session.commit()
+    new_user.save()
     
     return jsonify({
         'message': 'User created successfully',
         'user_id': new_user.id
     }), 201
 
-@app.route('/api/admin/delete-user/<int:user_id>', methods=['DELETE'])
+@app.route('/api/admin/delete-user/<user_id>', methods=['DELETE'])
 @login_required
 def delete_user(user_id):
     # Security check - only admin can delete users
@@ -506,16 +508,17 @@ def delete_user(user_id):
     if user_id == current_user.id:
         return jsonify({'message': 'Cannot delete your own account'}), 400
     
-    user = User.query.get_or_404(user_id)
+    user = User.find_by_id(user_id)
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
     
     # Delete user's files and directories
     user_dir = os.path.join(app.config['UPLOAD_FOLDER'], str(user_id))
     if os.path.exists(user_dir):
         shutil.rmtree(user_dir)
     
-    # User's applications and files will be deleted via cascade
-    db.session.delete(user)
-    db.session.commit()
+    # Delete user (applications and files will be handled by the model's delete method)
+    user.delete()
     
     return jsonify({'message': 'User deleted successfully'}), 200
 
@@ -527,28 +530,13 @@ def get_university_report():
         return jsonify({'message': 'Unauthorized access'}), 403
     
     # Get enrolled students grouped by university
-    enrolled_data = db.session.query(
-        Application.enrolled_university,
-        db.func.count(Application.id).label('count')
-    ).filter(
-        Application.enrollment_status == 'enrolled',
-        Application.enrolled_university != None,
-        Application.enrolled_university != ''
-    ).group_by(Application.enrolled_university).all()
-    
-    # Format report data
-    university_report = [
-        {
-            'university': item[0],
-            'student_count': item[1]
-        } for item in enrolled_data
-    ]
+    university_report = Application.get_university_statistics()
     
     return jsonify({
-        'report_date': '2025-03-22 16:22:40',  # Use the provided date/time
+        'report_date': '2025-03-23 05:16:48',  # Use the provided date/time
         'total_enrolled': sum(item['student_count'] for item in university_report),
         'universities': university_report,
-        'generated_by': 'User'  # Add the username
+        'generated_by': 'Rishikesh0523'  # Add the username
     }), 200
 
 @app.route('/api/admin/enrollment-statistics', methods=['GET'])
@@ -558,29 +546,17 @@ def get_enrollment_statistics():
     if not current_user.is_admin:
         return jsonify({'message': 'Unauthorized access'}), 403
     
-    # Count applications by enrollment status
-    status_counts = {}
-    for status in ['planning', 'applied', 'accepted', 'enrolled']:
-        count = Application.query.filter_by(enrollment_status=status).count()
-        status_counts[status] = count
-    
-    # Count application with no enrollment status (legacy data)
-    none_count = Application.query.filter(
-        (Application.enrollment_status == None) | 
-        (Application.enrollment_status == '')
-    ).count()
-    
-    if none_count > 0:
-        status_counts['none'] = none_count
+    # Get status counts from the model
+    status_counts = Application.get_enrollment_statistics()
     
     # Get total applications
-    total_applications = Application.query.count()
+    total_applications = Application.count_by_enrollment_status()
     
     return jsonify({
-        'report_date': '2025-03-22 16:22:40',  # Use the provided date/time
+        'report_date': '2025-03-23 05:16:48',  # Use the provided date/time
         'total_applications': total_applications,
         'status_counts': status_counts,
-        'generated_by': 'User'  # Add the username
+        'generated_by': 'Rishikesh0523'  # Add the username
     }), 200
 
 # Error handlers
@@ -593,4 +569,4 @@ def server_error(error):
     return jsonify({'message': 'Internal server error'}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=os.getenv('FLASK_DEBUG', 'True').lower() == 'true')
